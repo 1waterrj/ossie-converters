@@ -46,8 +46,8 @@ uv run pytest
 | Ossie construct | LookML output |
 |-----------------|---------------|
 | Ossie document (root `name`, `description`, `datasets`, …) | One LookML document: a header comment, the views, then the explores (split into `.view.lkml` / `.model.lkml` files when checking into a Looker project) |
-| `dataset` | `view` with `sql_table_name` (3-part sources are backtick-quoted as `` `project.dataset.table` ``; subquery sources become a `derived_table`). The dataset `description` (plus `ai_context` synonyms) has no view-level parameter in LookML, so it is kept as a comment in the view and emitted as the explore `description` |
-| `dataset.primary_key` | `primary_key: yes` on the key dimension; composite keys (and keys over a `dimension_group`) become a hidden `primary_key` dimension that `CONCAT`s the `CAST(... AS STRING)` columns, the pattern Looker documents for composite keys |
+| `dataset` | `view` with `sql_table_name` (3-part sources are backtick-quoted as `` `project.dataset.table` ``, sources that already carry backticks are emitted as-is; subquery sources become a `derived_table`). The dataset `description` (plus `ai_context` synonyms) has no view-level parameter in LookML, so it is kept as a comment in the view and emitted as the explore `description` |
+| `dataset.primary_key` | `primary_key: yes` on the key dimension; composite keys (and keys over a `dimension_group`) become a hidden `primary_key` dimension that `CONCAT`s each key field's expression as `CAST(... AS STRING)`, the pattern Looker documents for composite keys |
 | `field` | `dimension` typed from `datatype` (see below), with `label` and `description` |
 | `field` with a temporal `datatype`, or `is_time: true` and no `datatype` | `dimension_group` with `type: time`, `datatype: date \| datetime \| timestamp`, and standard timeframes. A trailing `_date` / `_time` / `_datetime` / `_timestamp` is dropped from the group name (so `created_at`-style groups expose `created_date`, `created_month`, …) unless that would collide with another field |
 | `metric` | `measure` in the view of the dataset it aggregates (see below) |
@@ -79,7 +79,7 @@ LookML needs every view, field, measure and join name to be a valid identifier a
 
 Every field and metric expression is parsed with [sqlglot](https://github.com/tobymao/sqlglot) (BigQuery dialect) and its column references are rewritten to LookML substitutions:
 
-- a bare `column` becomes `${TABLE}.column` (a physical column of the view);
+- a bare `column` becomes `${TABLE}.column` (a physical column of the view); a quoted identifier keeps its backticks (`` ${TABLE}.`Order ID` ``), and a bare literal or keyword (`NULL`, `TRUE`, `CURRENT_DATE`) is left alone rather than treated as a column;
 - `dataset.column` becomes `${dataset.field}`, resolved through the fields the dataset exposes, so a join or metric on a time column lands on the `dimension_group`'s `_raw` timeframe rather than a name that no longer exists;
 - a reference to a dataset that is not in the model, or to a column no field exposes, is emitted as-is with a warning naming the field or metric.
 

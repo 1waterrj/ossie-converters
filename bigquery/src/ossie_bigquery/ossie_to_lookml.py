@@ -425,7 +425,13 @@ def _plan_primary_key(plan):
             field.primary_key = True
             return
 
-    parts = [f"CAST(${{TABLE}}.{col} AS STRING)" for col in plan.primary_key]
+    # Keys name fields, so take each one's expression (a key over a column no
+    # field exposes falls back to the physical column).
+    parts = []
+    for key in plan.primary_key:
+        field = plan.resolve(key)
+        key_sql = field.sql if field is not None else f"${{TABLE}}.{key}"
+        parts.append(f"CAST({key_sql} AS STRING)")
     sql = parts[0] if len(parts) == 1 else "CONCAT(" + ", '|', ".join(parts) + ")"
     name = plan.free_name("primary_key", "pk", "ossie_primary_key")
     plan.pk_dimension = _Field("primary_key", name, "dimension", sql)
@@ -537,6 +543,10 @@ def _convert_source(source, dataset_name):
             + "\n}"
         )
 
+    if "`" in source_stripped:
+        # Already quoted (wholly or per part); wrapping again would be invalid.
+        return f"sql_table_name: {source_stripped} ;;"
+
     parts = source_stripped.split(".")
     if len(parts) == 3:
         # BigQuery fully-qualified names are conventionally backtick-quoted.
@@ -613,18 +623,22 @@ def _qualify(expr, home, plans, context, tree=None):
     when the expression could not be parsed).
     """
     expr = expr.strip()
-    if _LOOKML_NAME.match(expr):
-        return f"${{TABLE}}.{expr}", expr, exp.Var(this=f"${{TABLE}}.{expr}")
-
     if tree is None:
         tree = _parse(expr, context)
     if tree is None:
         return expr, None, None
 
+    # Parsing (rather than a regex) tells a column apart from a bare literal
+    # or keyword such as NULL or CURRENT_DATE, and keeps identifier quoting.
+    bare_column = None
+    if isinstance(tree, exp.Column) and not tree.table and not tree.args.get("db"):
+        bare_column = tree.name
+
     def rewrite(node):
         if not isinstance(node, exp.Column):
             return node
-        column = node.name
+        column = node.name                           # unquoted, for lookups
+        ident = node.this.sql(dialect="bigquery")    # as written, quotes kept
         table = node.table
         if node.args.get("db"):
             warnings.warn(
@@ -633,14 +647,14 @@ def _qualify(expr, home, plans, context, tree=None):
             )
             return exp.Var(this=node.sql(dialect="bigquery"))
         if not table:
-            return exp.Var(this=f"${{TABLE}}.{column}")
+            return exp.Var(this=f"${{TABLE}}.{ident}")
         plan = plans.get(table)
         if plan is None:
             warnings.warn(
                 f"{context}: '{table}.{column}' references unknown dataset "
                 f"'{table}'; emitted as-is"
             )
-            return exp.Var(this=f"{table}.{column}")
+            return exp.Var(this=node.sql(dialect="bigquery"))
         field = plan.resolve(column)
         if field is not None:
             return exp.Var(this=f"${{{table}.{field.ref}}}")
@@ -649,7 +663,7 @@ def _qualify(expr, home, plans, context, tree=None):
                 f"{context}: '{table}.{column}' matches no field in dataset "
                 f"'{table}'; referencing the physical column"
             )
-            return exp.Var(this=f"${{TABLE}}.{column}")
+            return exp.Var(this=f"${{TABLE}}.{ident}")
         warnings.warn(
             f"{context}: '{table}.{column}' matches no field in dataset "
             f"'{table}'; Looker needs a dimension for it"
@@ -657,7 +671,7 @@ def _qualify(expr, home, plans, context, tree=None):
         return exp.Var(this=f"${{{table}.{column}}}")
 
     rewritten = tree.transform(rewrite)
-    return rewritten.sql(dialect="bigquery"), None, rewritten
+    return rewritten.sql(dialect="bigquery"), bare_column, rewritten
 
 
 # ---------------------------------------------------------------------------

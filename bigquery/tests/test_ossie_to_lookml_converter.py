@@ -181,6 +181,16 @@ class TestConvertSource:
             "sql_table_name: `proj.dataset.tbl` ;;"
         )
 
+    def test_quoted_three_part_is_not_wrapped_again(self):
+        assert _convert_source("`my-proj.ds.tbl`", "ds") == (
+            "sql_table_name: `my-proj.ds.tbl` ;;"
+        )
+
+    def test_mixed_quoting_is_emitted_as_is(self):
+        assert _convert_source("`my-proj`.ds.tbl", "ds") == (
+            "sql_table_name: `my-proj`.ds.tbl ;;"
+        )
+
     def test_subquery_becomes_derived_table(self):
         out = _convert_source("SELECT * FROM t", "ds")
         assert out.startswith("derived_table: {")
@@ -298,6 +308,19 @@ class TestFields:
         assert "sql: DATE_TRUNC(${TABLE}.order_date, MONTH) ;;" in out
         assert "sql: SAFE_CAST(LOWER(${TABLE}.email) AS STRING) ;;" in out
 
+    def test_quoted_column_keeps_its_quotes(self):
+        out = self._view(_field("oid", expr="`Order ID`"))
+        assert "sql: ${TABLE}.`Order ID` ;;" in out
+
+    def test_quoted_column_in_an_expression_keeps_its_quotes(self):
+        out = self._view(_field("oid", expr="CAST(`Order ID` AS STRING)"))
+        assert "sql: CAST(${TABLE}.`Order ID` AS STRING) ;;" in out
+
+    @pytest.mark.parametrize("literal", ["NULL", "TRUE", "CURRENT_DATE"])
+    def test_sql_literals_are_not_columns(self, literal):
+        out = self._view(_field("lit", expr=literal))
+        assert f"sql: {literal} ;;" in out
+
     def test_unparseable_expression_is_verbatim_with_warning(self):
         model = _model([_dataset("t", [_field("weird", expr="SELECT FROM WHERE ((")])])
         with pytest.warns(UserWarning, match="Field 't.weird'.*verbatim"):
@@ -380,6 +403,26 @@ class TestPrimaryKey:
         out = _convert(_model([ds]))
         pk = _block(out, "dimension: primary_key")
         assert "sql: CAST(${TABLE}.created_at AS STRING) ;;" in pk
+
+    def test_composite_key_uses_the_key_fields_expressions(self):
+        # A key names fields; the physical column comes from the field's
+        # expression, like every other reference to it.
+        ds = _dataset("t", [_field("cust", expr="customer_id"), _field("b")], primary_key=["cust", "b"])
+        out = _convert(_model([ds]))
+        pk = _block(out, "dimension: primary_key")
+        assert "sql: CONCAT(CAST(${TABLE}.customer_id AS STRING), '|', CAST(${TABLE}.b AS STRING)) ;;" in pk
+
+    def test_time_key_uses_the_groups_expression(self):
+        ds = _dataset("t", [_field("created", expr="created_at", is_time=True)], primary_key=["created"])
+        out = _convert(_model([ds]))
+        pk = _block(out, "dimension: primary_key")
+        assert "sql: CAST(${TABLE}.created_at AS STRING) ;;" in pk
+
+    def test_key_over_unexposed_column_falls_back_to_the_physical_column(self):
+        ds = _dataset("t", [_field("a")], primary_key=["a", "tenant"])
+        out = _convert(_model([ds]))
+        pk = _block(out, "dimension: primary_key")
+        assert "sql: CONCAT(CAST(${TABLE}.a AS STRING), '|', CAST(${TABLE}.tenant AS STRING)) ;;" in pk
 
     def test_join_target_without_key_warns(self):
         customers = _dataset("customers", [_field("id")])
@@ -645,6 +688,11 @@ class TestRelationships:
         model = _model([orders, CUSTOMERS], [_rel("o2c", "orders", "customers", ["customer_id"], ["id"])])
         out = _convert(model)
         assert "sql_on: ${orders.cust} = ${customers.id} ;;" in out
+
+    def test_sql_on_resolves_a_quoted_column_to_its_field(self):
+        orders = _dataset("orders", [_field("id"), _field("cust", expr="`Customer ID`")], primary_key=["id"])
+        model = _model([orders, CUSTOMERS], [_rel("o2c", "orders", "customers", ["Customer ID"], ["id"])])
+        assert "sql_on: ${orders.cust} = ${customers.id} ;;" in _convert(model)
 
     def test_sql_on_unknown_column_warns(self):
         orders = _dataset("orders", [_field("id")], primary_key=["id"])
